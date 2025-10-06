@@ -5,12 +5,12 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import datasets
+import torch
 import evaluate
 import nltk
 import numpy as np
 from datasets import load_dataset
 
-import torch
 import transformers
 from transformers import (
     AutoConfig,
@@ -24,6 +24,8 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version
+from transformers import BitsAndBytesConfig
+
 from peft import LoraConfig, get_peft_model, TaskType
 
 from dotenv import load_dotenv
@@ -275,7 +277,12 @@ def main():
         revision=model_args.model_revision,
         token=model_args.token,
         trust_remote_code=model_args.trust_remote_code,
+        torch_dtype=torch.bfloat16,
     )
+
+    if model_args.use_lora and training_args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        model.enable_input_require_grads()
 
     if model_args.use_lora:
         logger.info("Applying LoRA configuration...")
@@ -479,6 +486,7 @@ def main():
         processing_class=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics,
+
     )
 
     # Training
@@ -573,27 +581,27 @@ def main():
                 max_length=data_args.max_source_length
             ).to(training_args.device)
 
-            # Generate
             with torch.no_grad():
                 outputs = model.generate(
                     **inputs,
                     max_new_tokens=data_args.max_target_length,
                     num_beams=4,  # Use beam search
                     do_sample=False,
-                    temperature=1.0,
+                    temperature=0.1,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
                 )
 
-            # Decode
-            decoded = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+            # 🔥 NEW: Slice off the input tokens, keep only generated tokens
+            input_length = inputs["input_ids"].shape[1]
+            generated_tokens = outputs[:, input_length:]
 
-            # Extract summary part
+            # 🔥 MODIFIED: Decode only the generated tokens
+            decoded = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+
+            # 🔥 SIMPLIFIED: No need to split anymore
             for pred in decoded:
-                if "Summary: " in pred:
-                    predictions.append(pred.split("Summary: ")[-1].strip())
-                else:
-                    predictions.append(pred.strip())
+                predictions.append(pred.strip())
 
             references.extend(batch[summary_column])
 
